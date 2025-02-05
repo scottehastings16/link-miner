@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "app.js",
   "scripts": {
-    "test": "mocha", 
+    "test": "mocha",
     "start": "node app.js"
   },
   "repository": {
@@ -20,14 +20,21 @@
     "chai": "^5.1.2",
     "exceljs": "^4.4.0",
     "express": "^4.21.2",
+    "image-size": "^1.2.0",
     "mocha": "^11.1.0",
-    "puppeteer": "^24.1.1", 
-    "sharp": "^0.33.5"   
+    "pdfkit": "^0.16.0",
+    "puppeteer": "^24.1.1",
+    "selenium-webdriver": "^4.28.1",
+    "sharp": "^0.33.5"
   },
   "engines": {
     "node": "16.x",
     "npm": "8.x"
   },
-  "keywords": ["web scraping", "excel", "puppeteer"], 
-  "description": "A web scraping tool that saves data to an Excel file." 
-  }
+  "keywords": [
+    "web scraping",
+    "excel",
+    "puppeteer"
+  ],
+  "description": "A web scraping tool that saves data to an Excel file."
+}
