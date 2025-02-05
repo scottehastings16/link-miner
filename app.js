@@ -1,177 +1,185 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
-const ExcelJS = require('exceljs');
+const PDFDocument = require('pdfkit'); // Install this package: npm install pdfkit
 const fs = require('fs');
 const path = require('path');
+const sizeOf = require('image-size'); // Install this package: npm install image-size
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 
+// Middleware to parse JSON data
 app.use(express.json());
-app.use(express.static('public'));
 
-const decodeHtmlEntities = (html) => {
-return html.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-};
+// Serve static files from the "public" directory
+app.use(express.static(path.join(__dirname, 'public')));
 
-const flattenJson = (prefix, obj) => {
-const result = {};
-for (const [key, value] of Object.entries(obj)) {
-    if (typeof value === 'object' && value !== null && value !== obj) {
-        const nestedFlattened = flattenJson(key, value);
-        for (const [nestedKey, nestedValue] of Object.entries(nestedFlattened)) {
-            result[nestedKey] = nestedValue;
-        }
-    } else {
-        const fullKey = prefix ? `${prefix}_${key}` : key;
-        result[fullKey] = value;
-    }
-}
-return result;
-};
-
-const formatJsonAsKeyValuePairs = (jsonData) => {
-const flattened = flattenJson('', jsonData);
-const keyValuePairs = Object.entries(flattened).map(([key, value]) => `${renameKey(key)}:${value}`);
-return keyValuePairs.join('\n');
-};
-
-const renameKey = (key) => {
-return key.replace(/\./g, '_');
-};
-
+// Endpoint to scrape data
 app.post('/scrape', async (req, res) => {
-const { urls } = req.body;
+ const { urls } = req.body;
 
-if (!urls || !Array.isArray(urls) || urls.length === 0) {
-    return res.status(400).json({ error: 'Please provide a valid array of URLs.' });
-}
+ if (!urls || !Array.isArray(urls) || urls.length === 0) {
+     return res.status(400).json({ error: 'Please provide a valid array of URLs.' });
+ }
 
-const browser = await puppeteer.launch();
-const page = await browser.newPage();
+ console.log(`Received URLs to scrape: ${urls}`);
 
-const workbook = new ExcelJS.Workbook();
-const worksheet = workbook.addWorksheet('Sheet1');
+ const browser = await puppeteer.launch({ headless: false }); // Set headless to false for debugging
+ const page = await browser.newPage();
 
-worksheet.columns = [
-    { header: 'URL', key: 'url', width: 30 },
-    { header: 'Readable Key-Value Pairs', key: 'data', width: 50 },
-    { header: 'Screenshot', key: 'screenshot', width: 30 }
-];
+ // Directory to save screenshots
+ const screenshotsDir = path.join(__dirname, 'screenshots');
+ if (!fs.existsSync(screenshotsDir)) {
+     fs.mkdirSync(screenshotsDir);
+ }
 
-const minWidth = 100;
-const minHeight = 100;
-const maxWidth = 400;
-const maxHeight = 300;
+ const pdfFilePath = path.join(__dirname, 'output.pdf');
+ const doc = new PDFDocument({ margin: 30 });
+ const writeStream = fs.createWriteStream(pdfFilePath);
+ doc.pipe(writeStream);
 
-try {
-    for (const url of urls) {
-        await page.goto(url);
-        try {
-            await page.waitForSelector('#close-pc-btn-handler', { timeout: 5000 });
-            await page.click('#close-pc-btn-handler');
-        } catch (error) { }
+ try {
+     for (const url of urls) {
+         console.log(`Processing URL: ${url}`);
+         await page.goto(url, { waitUntil: 'networkidle2' });
 
-        const elementsData = await page.evaluate(() => {
-            const uniqueElements = new Map();
-            Array.from(document.querySelectorAll('[data-cmp-data-layer]')).forEach(el => {
-                try {
-                    const encodedJson = el.getAttribute('data-cmp-data-layer');
-                    const decodedJson = decodeHtmlEntities(encodedJson);
-                    const jsonData = JSON.parse(decodedJson);
-                    const parent = el.closest('.cmp-teaser');
-                    const uniqueKey = parent ? `${el.id}-${parent.dataset.cmpDataLayer}` : el.id;
-                    if (!uniqueElements.has(uniqueKey)) {
-                        const boundingBox = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
-                        uniqueElements.set(uniqueKey, {
-                            id: el.id,
-                            data: jsonData,
-                            naturalWidth: boundingBox.width,
-                            naturalHeight: boundingBox.height,
-                            parentSelector: parent ? '.cmp-teaser' : null,
-                            uniqueKey
-                        });
-                    }
-                } catch (error) {
-                    console.error("Error processing element:", error);
-                }
-            });
-            return Array.from(uniqueElements.values());
-        });
+         // Handle the cookie banner
+         try {
+             const cookieBannerSelector = '#close-pc-btn-handler';
+             if (await page.$(cookieBannerSelector)) {
+                 console.log('Cookie banner detected. Closing it...');
+                 await page.click(cookieBannerSelector);
+                 await page.waitForTimeout(2000); // Wait for the banner to close
+                 console.log('Cookie banner closed.');
+             } else {
+                 console.log('No cookie banner detected.');
+             }
+         } catch (error) {
+             console.warn('Error handling cookie banner:', error);
+         }
 
-        if (elementsData.length === 0) {
-            continue;
-        }
+         // Process all elements with a valid ID and the `data-cmp-clickable` attribute
+         const clickableElements = await page.$$('[data-cmp-clickable][id]');
+         console.log(`Found ${clickableElements.length} clickable elements with valid IDs.`);
 
-        let elementIndex = 0;
+         for (const [index, element] of clickableElements.entries()) {
+             // Locate the parent component if necessary
+             const parentComponent = await element.evaluateHandle(el => {
+                 let parent = el.closest('.cmp-teaser');
+                 return parent || el; // If no parent found, return the element itself
+             });
 
-        for (const element of elementsData) {
-            const { uniqueKey, id, data, naturalWidth, naturalHeight, parentSelector } = element;
-            elementIndex++;
+             // Extract JSON data from the clickable button
+             const buttonDataLayer = await element.evaluate(el => {
+                 const dataLayer = el.getAttribute('data-cmp-data-layer');
+                 return dataLayer ? JSON.parse(dataLayer) : null;
+             });
 
-            let elementHandle = await page.$(`#${id}`);
-            if (!elementHandle) continue;
+             // Extract JSON data from the parent component
+             const parentDataLayer = await parentComponent.evaluate(el => {
+                 const dataLayer = el.getAttribute('data-cmp-data-layer');
+                 return dataLayer ? JSON.parse(dataLayer) : null;
+             });
 
-            if (parentSelector) {
-                elementHandle = await page.evaluateHandle(el => el.closest('.cmp-teaser'), elementHandle);
-            }
+             // Combine the data layers
+             const combinedDataLayer = {
+                 buttonData: buttonDataLayer,
+                 parentData: parentDataLayer
+             };
 
-            const screenshotPath = `screenshots/${uniqueKey}.png`;
-            if (!fs.existsSync('screenshots')) fs.mkdirSync('screenshots');
-            await elementHandle.screenshot({ path: screenshotPath });
+             console.log(`Element ${index + 1} Combined JSON Data:`, combinedDataLayer);
 
-            const formattedData = formatJsonAsKeyValuePairs(data);
-            const dataWithMetadata = `${id}:\n${formattedData}\nElement Index: ${elementIndex}\nPage URL: ${url}`;
+             // Take a screenshot of the parent component or the element itself
+             const screenshotPath = path.join(
+                 screenshotsDir,
+                 `element-${index + 1}.png`
+             );
+             await parentComponent.screenshot({ path: screenshotPath });
+             console.log(`Screenshot saved: ${screenshotPath}`);
 
-            let embedWidth = naturalWidth;
-            let embedHeight = naturalHeight;
+             // Get the original dimensions of the screenshot
+             const dimensions = sizeOf(screenshotPath);
+             const maxWidth = 200; // Desired maximum width for the image in the PDF
+             const scaleFactor = Math.min(maxWidth / dimensions.width, 1); // Scale down if necessary
+             const resizedWidth = Math.round(dimensions.width * scaleFactor);
+             const resizedHeight = Math.round(dimensions.height * scaleFactor);
 
-            if (naturalWidth < minWidth || naturalHeight < minHeight) {
-                const scalingFactor = Math.max(minWidth / naturalWidth, minHeight / naturalHeight);
-                embedWidth = naturalWidth * scalingFactor;
-                embedHeight = naturalHeight * scalingFactor;
-            }
+             // Calculate the space needed for the row
+             const rowHeight = Math.max(resizedHeight, 100); // Ensure minimum row height
 
-            if (naturalWidth > maxWidth || naturalHeight > maxHeight) {
-                const scalingFactor = Math.min(maxWidth / naturalWidth, maxHeight / naturalHeight);
-                embedWidth = naturalWidth * scalingFactor;
-                embedHeight = naturalHeight * scalingFactor;
-            }
+             // Check if there's enough space on the current page
+             if (doc.y + rowHeight + 50 > doc.page.height - doc.page.margins.bottom) {
+                 doc.addPage(); // Add a new page if not enough space
+             }
 
-            const row = worksheet.addRow({
-                url,
-                data: dataWithMetadata,
-                screenshot: ''
-            });
+             // Add a horizontal separator line before the row
+             if (index > 0) {
+                 doc.moveTo(30, doc.y) // Start the line at the left margin
+                     .lineTo(570, doc.y) // End the line at the right margin
+                     .strokeColor('#cccccc') // Light gray color for the line
+                     .lineWidth(1) // Thin line
+                     .stroke();
+                 doc.moveDown(1); // Add some spacing after the line
+             }
 
-            worksheet.getRow(row.number).height = embedHeight / 1.33;
+             // Add JSON data on the left with proper spacing
+             const startX = 50; // Starting X position for the row
+             let currentY = doc.y; // Current Y position
 
-            const imageId = workbook.addImage({
-                filename: screenshotPath,
-                extension: 'png'
-            });
+             // Add URL
+             doc.fontSize(10)
+                 .text(`URL: ${url}`, startX, currentY, { width: 250 })
+                 .moveDown(1); // Add extra spacing after this line
 
-            worksheet.addImage(imageId, {
-                tl: { col: 2, row: row.number - 1 },
-                ext: { width: embedWidth, height: embedHeight }
-            });
-        }
-    }
+             // Add Element ID
+             currentY = doc.y; // Update Y position
+             doc.text(`Element ID: ${await element.evaluate(el => el.id)}`, startX, currentY, { width: 250 })
+                 .moveDown(1); // Add extra spacing after this line
 
-    if (!fs.existsSync('public')) {
-        fs.mkdirSync('public');
-    }
+             // Add Extracted JSON Data label
+             currentY = doc.y; // Update Y position
+             doc.text(`Extracted JSON Data:`, startX, currentY, { width: 250 })
+                 .moveDown(0.5); // Slightly smaller spacing here
 
-    const excelFilePath = path.join(__dirname, 'public', 'output.xlsx');
-    await workbook.xlsx.writeFile(excelFilePath);
+             // Add JSON data (formatted)
+             currentY = doc.y; // Update Y position
+             doc.fontSize(8)
+                 .text(JSON.stringify(combinedDataLayer, null, 2), startX, currentY, { width: 250, lineGap: 4 }) // Add lineGap for better readability
+                 .moveDown(1); // Add extra spacing after the JSON block
 
-    await browser.close();
+             // Add the image on the right
+             doc.image(screenshotPath, startX + 300, currentY, {
+                 fit: [resizedWidth, resizedHeight],
+                 align: 'center',
+                 valign: 'top'
+             });
 
-    res.json({ message: 'Scraping completed successfully!', file: 'output.xlsx' });
-} catch (error) {
-    console.error("Scraping error:", error);
-    res.status(500).json({ error: 'An error occurred during scraping.' });
-}
+             // Move the cursor down to the next row
+             doc.y = currentY + rowHeight + 30; // Ensure enough vertical space for the next row
+         }
+     }
+
+     doc.end(); // Finalize the PDF
+     await new Promise(resolve => writeStream.on('finish', resolve));
+     console.log(`PDF file created successfully at ${pdfFilePath}`);
+
+     res.json({
+         message: 'Scraping completed successfully!',
+         filePath: '/output.pdf',
+         screenshotsDir: '/screenshots'
+     });
+     await browser.close();
+ } catch (error) {
+     console.error('Error during scraping:', error);
+     res.status(500).json({ error: 'An error occurred during scraping.' });
+ }
 });
 
+// Serve the generated PDF file
+app.use('/output.pdf', express.static(path.join(__dirname, 'output.pdf')));
+
+// Serve the screenshots directory
+app.use('/screenshots', express.static(path.join(__dirname, 'screenshots')));
+
+// Start the server
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
