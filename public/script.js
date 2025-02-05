@@ -3,7 +3,9 @@ document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
    
     const urls = document.getElementById('urls').value.split(',').map(url => url.trim());
     const statusDiv = document.getElementById('status');
+    statusDiv.style.display = 'block'; // Show the status div
     statusDiv.textContent = 'Scraping in progress...';
+    statusDiv.className = ''; // Clear any previous classes
    
     try {
         const response = await fetch('/scrape', {
@@ -13,14 +15,15 @@ document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
         });
    
         const result = await response.json();
-   
         if (response.ok) {
-            statusDiv.innerHTML = `Scraping completed! <a href="/output.xlsx" download>Download Excel File</a>`;
-            console.log(result.file)
+            statusDiv.className = 'success'; // Apply success styling
+            statusDiv.innerHTML = `Scraping completed! <a href="/output.pdf" download>Download PDF</a>`;
         } else {
+            statusDiv.className = 'error'; // Apply error styling
             statusDiv.textContent = `Error: ${result.error}`;
         }
     } catch (error) {
+        statusDiv.className = 'error'; // Apply error styling
         statusDiv.textContent = `Error: ${error.message}`;
     }
    });
